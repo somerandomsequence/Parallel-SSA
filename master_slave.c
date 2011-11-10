@@ -1,6 +1,14 @@
 /*
-	Basic framework for master / slave workflow to be used for simulated annealing.
-*/
+ * master_slave.c
+ *
+ * Parallel Spatial Simulated Annealing using OpenMPI, and a master-slave
+ * parallelism approach.
+ *
+ * Author(s): Guy Cobb <guy.cobb@gmail.com>
+ *            Caleb Phillips <cphillips@smallwhitecube.com>
+ *
+ * License: Academic/Beerware/MIT or something equivalent
+ */
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -99,7 +107,7 @@ void debug(const char* fmt, ...) {
   fflush(stdout);
 }
 
-// initialize the list of all possible points (master)
+/* initialize the list of all possible points (master) */
 int initialize_points(void){
   const int buflen = 512;
   char buffer[buflen];
@@ -139,7 +147,7 @@ int initialize_points(void){
   return n;
 }
 
-// fill pool with M randomly chosen (but not repeating) candidate solutions (master)
+/* fill pool with M randomly chosen (but not repeating) candidate solutions (master) */
 void initialize_pool(int npoints){
   int i, j, k, r;
   for(i = 0; i < M; i++){
@@ -176,7 +184,7 @@ void print_coords(struct coord *c, int n){
   for(i = 0; i < N; i++){ debug("%d: (%f,%f)\n",c[i].i,c[i].e,c[i].n); }
 }
 
-// master
+/* Prepare a candidate to send to a slave (master) */
 void check_out_candidate(int id){
   int r,j;
   int found = -1;
@@ -202,6 +210,7 @@ void check_out_candidate(int id){
   print_coords(coords,N);
 }
 
+/* Process a candidate returned by a slave (master) */
 void check_in_candidate(int id){
   int i,j;
   int found = 0;
@@ -209,12 +218,14 @@ void check_in_candidate(int id){
     if(pool[i].owner == id){
       pool[i].owner = -1;
       pool[i].checked_out = 0;
-      pool[i].fitness = fitness_after;
-      pool[i].last_gain = fitness_before-fitness_after;
-      for(j = 0; j < N; j++){
-        pool[i].coords[j].e = coords[j].e;
-        pool[i].coords[j].i = coords[j].i;
-        pool[i].coords[j].n = coords[j].n;
+      if(fitness_after > 0){ // fitness_after is <0 if something went wrong on the slave
+        pool[i].fitness = fitness_after;
+        pool[i].last_gain = fitness_before-fitness_after;
+        for(j = 0; j < N; j++){
+          pool[i].coords[j].i = coords[j].i;
+          pool[i].coords[j].n = points[coords[j].i].n;
+          pool[i].coords[j].e = points[coords[j].i].e;
+        }
       }
       found = 1;
       break;
@@ -229,12 +240,28 @@ void check_in_candidate(int id){
 }
 
 /* Do something with a candidate (slave) */
-void process_candidate(double *fitness_before, double *fitness_after){
-  int i, len, maxlen;
-  const char *prog = "R --vanilla < client.R --args ";
+int process_candidate(double *fitness_before, double *fitness_after, int nruns){
+  int i, len, j, maxlen;
+  const char *prog = "/home/esl/caleb/R-2.13.0/bin/R --vanilla --args ";
+  const char *progpost = " < slave.R 2>&1";
   char *cmd;
   char *pos;
+  char *str;
   char *tmp;
+  FILE *ph;
+  char *tok;
+  char *strptr;
+  const unsigned int buflen = 512;
+  char buffer[buflen];
+  double wpe_before, wpe_after, akv_before, akv_after;
+  int indices[N];
+
+  // construct the run id which is <rank>.<#>
+  int runidlen = 8;
+  if(nruns <= 1) runidlen += 1;
+  else runidlen += ceil(log((double)nruns)/log(10.0));
+  char *runid = (char *)malloc(sizeof(char)*runidlen);
+  snprintf(runid,runidlen,"%06d.%d",rank,nruns);
 
   debug("Processing Candidate: \n"); 
   print_coords(coords,N);
@@ -246,8 +273,9 @@ void process_candidate(double *fitness_before, double *fitness_after){
     if(len > maxlen) maxlen = len;
   }
   // allocate enough space to whole entire command
-  cmd = (char *)malloc(sizeof(char)*(strlen(prog) + N*(maxlen+1)));
-  tmp = (char *)malloc(sizeof(char)*(maxlen+1));
+  // <prog> <num 1>.<num 2>.[...].<num n> <runid>
+  cmd = (char *)malloc(sizeof(char)*(strlen(prog) + strlen(progpost) + strlen(runid) + 1 + N*(maxlen+1) + 1));
+  tmp = (char *)malloc(sizeof(char)*(maxlen+2));
 
   // construct the command string
   strcpy(cmd,prog);
@@ -258,12 +286,54 @@ void process_candidate(double *fitness_before, double *fitness_after){
     pos = &(cmd[strlen(cmd)]);
   }
   cmd[strlen(cmd)-1] = '\0'; // remove trailing period
+  strcat(cmd," ");
+  strcat(cmd,runid);
+  strcat(cmd,progpost);
   debug("%s\n",cmd);
 
-  // FIXME: actually run and process output
-  //*fitness_before = ?;
-  //*fitness_after = ?;
-  //coords = ?
+  // FITNESS 3.959667 3.958261 5.579055 5.574111 NULL
+  // > print(cat("SAMPLE",e,""))
+  // SAMPLE 7 1 2 3 9 4 6 8 10 37725 NULL
+  wpe_before = -1.0;
+  wpe_after = -1.0;
+  indices[N-1] = -1;
+  ph = popen(cmd,"r");
+  while(fgets(buffer,buflen,ph) != NULL){
+    debug(buffer);
+    if(strncmp(buffer,"FITNESS",7) == 0){
+      for(j = 1, str = buffer; ;j++, str = NULL){
+        tok = strtok_r(str," ",&strptr);
+        if(tok == NULL) break;
+
+        if(j == 2) wpe_before = atof(tok);
+        else if(j == 3) wpe_after = atof(tok);
+        else if(j == 4) akv_before = atof(tok);
+        else if(j == 5) akv_after = atof(tok);
+      }
+    }
+    else if(strncmp(buffer,"SAMPLE",6) == 0){
+      for(j = 1, str = buffer; ;j++, str = NULL){
+        tok = strtok_r(str," ",&strptr);
+        if(tok == NULL) break;
+        if((j > 1) && (j <= (N+1))) indices[j-2] = atoi(tok);
+      }
+    }
+  }
+  pclose(ph);
+
+  // sanity check that we actually read in something that looks like a result
+  if((wpe_before < 0) || (wpe_after < 0) || (indices[N-1] < 0)){
+    debug("Failed to parse output from R. wpe_before = %f, wpe_after = %f, last index = %d\n",wpe_before,wpe_after,indices[N-1]);
+    return 1;
+  }
+
+  *fitness_before = wpe_before;
+  *fitness_after = wpe_after;
+  for(i = 0; i < N; i++){
+    coords[i].i = indices[i];
+  }
+
+  return 0;
 }
 
 int main(int argc, char** argv) {
@@ -331,11 +401,10 @@ int main(int argc, char** argv) {
       MPI_Recv(&fitness_before, 1, MPI_DOUBLE, status.MPI_SOURCE, TAG_FITBEFORE, MPI_COMM_WORLD, &status);
       MPI_Recv(&fitness_after, 1, MPI_DOUBLE, status.MPI_SOURCE, TAG_FITAFTER, MPI_COMM_WORLD, &status);
 
-      nruns++;
-      check_in_candidate(status.MPI_SOURCE);
+      nruns++; // count runs by all slaves
 
-      // FIXME: do something when the possible solution, like put it
-      // back in the pool
+      // fitness_after will be negative if something went wrong
+      check_in_candidate(status.MPI_SOURCE);
 
       // FIXME: at some point, prune or evolve the pool or something
 
@@ -369,7 +438,12 @@ int main(int argc, char** argv) {
 	MPI_Recv(coords, N, coord_type, master, TAG_COORDS, MPI_COMM_WORLD, &status);
 
 	/* Perform simulated annealing on candidate */
-	process_candidate(&fitness_before,&fitness_after);
+	if(process_candidate(&fitness_before,&fitness_after,nruns++) > 0){
+          debug("Problems in process candidate\n");
+          // make these negative so the master know's something went wrong.
+          fitness_after = -1.0;
+          fitness_before = -1.0;
+        }
 
 	/* Send our results back to the master */
         MPI_Send(&fitness_after, 1, MPI_DOUBLE, master, TAG_FITAFTER, MPI_COMM_WORLD);
