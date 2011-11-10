@@ -59,6 +59,7 @@ struct job{
 	int checked_out;
 	int run_count;
 	int owner;
+	int last_owner;
 	double fitness;
 	double last_gain;
 };
@@ -154,6 +155,7 @@ void initialize_pool(int npoints){
     pool[i].checked_out = 0;
     pool[i].run_count = 0;
     pool[i].owner = -1;
+    pool[i].last_owner = -1;
     pool[i].fitness = -1.0;
     pool[i].last_gain = 0.0;
     pool[i].coords = (struct coord *)malloc(sizeof(struct coord)*N);
@@ -216,6 +218,7 @@ void check_in_candidate(int id){
   int found = 0;
   for(i = 0; i < M; i++){
     if(pool[i].owner == id){
+      pool[i].last_owner = id;
       pool[i].owner = -1;
       pool[i].checked_out = 0;
       if(fitness_after > 0){ // fitness_after is <0 if something went wrong on the slave
@@ -418,6 +421,24 @@ int main(int argc, char** argv) {
 
     /* send shutdown signal to all slaves */
     for (i=1; i<np; i++) MPI_Send(&dummy_val, 1, MPI_INT, i, TAG_SHUTDOWN, MPI_COMM_WORLD);
+
+    // look through pool and pick out winner
+    double min_fitness = -1.0;
+    double max_fitness = -1.0;
+    int min_fitness_index = 0;
+    for (i = 0; i < M; i++){
+      if((min_fitness < 0) || (pool[i].fitness < min_fitness)){
+        min_fitness = pool[i].fitness;
+        min_fitness_index = i;
+      }
+      if((max_fitness < 0) || ((pool[i].run_count > 0) && (pool[i].fitness > max_fitness))){
+        max_fitness = pool[i].fitness;
+      }
+    }
+    debug("Minimum fitness obtained = %f, worst (optimized) fitness is %f worse\n",min_fitness,max_fitness-min_fitness);
+    debug("Best result is in sa_slave_%06d.*.RData, although I'm not sure which run id...\n",pool[min_fitness_index].last_owner);
+    debug("Here's the sample:\n");
+    print_coords(pool[min_fitness_index].coords,N);
 
   } else {
 
