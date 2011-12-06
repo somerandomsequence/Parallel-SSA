@@ -18,12 +18,12 @@
 #include <mpi.h>
 #include <stdio.h>
 
-#define N 10         // number of coordinates in a solution
-#define M 10         // number of solutions to maintain in pool
-#define MAX_RUNS 10  // maximum number of slave-runs to do
-#define VERBOSE 1    // debugging output (on = 1, off = 0)
-#define COLOR 1      // colorize output (on = 1, off = 0)
-#define GDB_ATTACH 0 // sleep in master to allow a gdb attachment
+#define N 10          // number of coordinates in a solution
+#define M 50          // number of solutions to maintain in pool
+#define MAX_RUNS 100  // maximum number of slave-runs to do
+#define VERBOSE 1     // debugging output (on = 1, off = 0)
+#define COLOR 1       // colorize output (on = 1, off = 0)
+#define GDB_ATTACH 0  // sleep in master to allow a gdb attachment
 
 #define TAG_COORDS 0
 #define TAG_SHUTDOWN 1
@@ -409,14 +409,13 @@ int main(int argc, char** argv) {
       // fitness_after will be negative if something went wrong
       check_in_candidate(status.MPI_SOURCE);
 
+      if (nruns > MAX_RUNS) break;
+
       // FIXME: at some point, prune or evolve the pool or something
 
       /* Send out next candidate to the slave that just reported in */
       check_out_candidate(status.MPI_SOURCE);
       MPI_Send(coords, N, coord_type, status.MPI_SOURCE, TAG_COORDS, MPI_COMM_WORLD);
-
-      /* TODO: decide on stopping criteria */
-      if (nruns > MAX_RUNS) break;
     }
 
     /* send shutdown signal to all slaves */
@@ -427,7 +426,7 @@ int main(int argc, char** argv) {
     double max_fitness = -1.0;
     int min_fitness_index = 0;
     for (i = 0; i < M; i++){
-      if((min_fitness < 0) || (pool[i].fitness < min_fitness)){
+      if((min_fitness < 0) || ((pool[i].run_count > 0) && (pool[i].fitness < min_fitness))){
         min_fitness = pool[i].fitness;
         min_fitness_index = i;
       }

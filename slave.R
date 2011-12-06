@@ -3,6 +3,8 @@ load('preprocess.RData')
 
 # simulated annealing
 n <- 10
+tmax <- 1000
+
 dcoords.new <- NULL
 
 # first argument is a period-separated list of indices into the candidates dataframe
@@ -11,7 +13,6 @@ e <- as.numeric(unlist(strsplit(e, "\\.")))
 de <- candidates[e,]
 runid <- commandArgs(TRUE)[2]
 
-tmax <- 1000
 t <- tmax
 kv <- krige.var(rbind(dcoords,de[,c("x","y")]),loci,kc)
 vmap <- flipud(matrix(kv,nrow=height,ncol=width,byrow=TRUE))
