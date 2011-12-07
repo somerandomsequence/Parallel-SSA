@@ -18,7 +18,7 @@
 #include <mpi.h>
 #include <stdio.h>
 
-#define N 10          // number of coordinates in a solution
+#define N 25          // number of coordinates in a solution
 #define M 50          // number of solutions to maintain in pool
 #define MAX_RUNS 100  // maximum number of slave-runs to do
 #define VERBOSE 1     // debugging output (on = 1, off = 0)

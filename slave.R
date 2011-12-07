@@ -4,8 +4,8 @@ load('preprocess.RData')
 # simulated annealing
 n <- 10
 tmax <- 1000
-
 dcoords.new <- NULL
+num.children <- 8
 
 # first argument is a period-separated list of indices into the candidates dataframe
 e <- commandArgs(TRUE)[1]
@@ -14,7 +14,8 @@ de <- candidates[e,]
 runid <- commandArgs(TRUE)[2]
 
 t <- tmax
-kv <- krige.var(rbind(dcoords,de[,c("x","y")]),loci,kc)
+c1 <- makeForkCluster(num.children)
+kv <- krige.var.par(rbind(dcoords,de[,c("x","y")]),loci,kc,c1)
 vmap <- flipud(matrix(kv,nrow=height,ncol=width,byrow=TRUE))
 fitness <- wpe(rmap,vmap)
 fitness2 <- mean(sqrt(vmap))
@@ -35,7 +36,7 @@ while(t > 0){
     e2 <- append(e2,p)
     de2 <- rbind(de2,candidates[p,])
   }
-  kv <- krige.var(rbind(dcoords,de2[,c("x","y")]),loci,kc)
+  kv <- krige.var.par(rbind(dcoords,de2[,c("x","y")]),loci,kc,c1)
   vmap <- flipud(matrix(kv,nrow=height,ncol=width,byrow=TRUE))
   new.fitness <- wpe(rmap,vmap)
   new.fitness2 <- mean(sqrt(vmap))
@@ -70,6 +71,8 @@ while(t > 0){
   t <- t - 1
   log <- rbind(log,data.frame(t=t,replaced=replaced,p=p,fitness=fitness,fitness2=fitness2,deltaf=deltaf))
 }
+
+stopCluster(c1)
 
 wpe.gain <- first.fitness-fitness
 akv.gain <- first.fitness2-fitness2

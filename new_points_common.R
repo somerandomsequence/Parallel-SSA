@@ -2,6 +2,7 @@ library(geoR)
 library(lattice)
 library(matlab) # for flipud()
 library(splancs) # for pip (point in polygon)
+library(parallel) # for krige.var's parallel version
 
 # This is a definition of kriging variance that is based directly 
 # on geoR's krige.conv with the nonapplicable stuff stripped out
@@ -117,15 +118,23 @@ krige.var.geoR <- function (coords, data, locations, krige){
 krige.var <- function(dcoords,loci,kc){
   cs <- cov.spatial(obj=loccoords(coords=dcoords,locations=loci),cov.model=kc$cov.model,cov.pars=kc$cov.pars,kappa=kc$cov.kappa)
   vcinv <- varcov.spatial(coords=dcoords, cov.model=kc$cov.model,cov.pars=kc$cov.pars,kappa=kc$kappa,nugget=kc$nugget,inv=TRUE)$inverse
-  sigmak <- NULL; 
   sigmasq <- kc$cov.pars[1]
-  for(i in seq(1,nrow(loci))){ 
-    v <- sigmasq - t(cs[,i]) %*% vcinv %*% t(t(cs[,i]))
-    sigmak <- rbind(sigmak,v)
-  }
+  sigmak <- lapply(seq(1,nrow(loci)),function(i){ sigmasq - t(cs[,i]) %*% vcinv %*% t(t(cs[,i])) })
   rm(vcinv,cs)
   return(sigmak)
 }  
+
+# fourth argument is a cluster made with a command like makeForkCluster(N)
+krige.var.par <- function(dcoords,loci,kc,c1){
+  cs <- cov.spatial.par(obj=loccoords(coords=dcoords,locations=loci),cov.model=kc$cov.model,cov.pars=kc$cov.pars,kappa=kc$cov.kappa)
+  vcinv <- varcov.spatial(coords=dcoords, cov.model=kc$cov.model,cov.pars=kc$cov.pars,kappa=kc$kappa,nugget=kc$nugget,inv=TRUE)$inverse
+  sigmasq <- kc$cov.pars[1]
+  #c1 <- makeForkCluster(n.par) # doesn't work on windoze, but faster on *nix
+  sigmak <- parLapply(c1,seq(1,nrow(loci)),function(i){ sigmasq - t(cs[,i]) %*% vcinv %*% t(t(cs[,i])) })
+  #stopCluster(c1)
+  rm(vcinv,cs)
+  return(sigmak)
+} 
 
 roughness <- function(map,height,width,nr=1,pix.per.m=0.2,beta=1.5,alpha=1.0){
   height <- nrow(map)
