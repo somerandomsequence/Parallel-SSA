@@ -121,19 +121,19 @@ krige.var <- function(dcoords,loci,kc){
   sigmasq <- kc$cov.pars[1]
   sigmak <- lapply(seq(1,nrow(loci)),function(i){ sigmasq - t(cs[,i]) %*% vcinv %*% t(t(cs[,i])) })
   rm(vcinv,cs)
-  return(sigmak)
+  return(as.numeric(sigmak))
 }  
 
 # fourth argument is a cluster made with a command like makeForkCluster(N)
 krige.var.par <- function(dcoords,loci,kc,c1){
-  cs <- cov.spatial.par(obj=loccoords(coords=dcoords,locations=loci),cov.model=kc$cov.model,cov.pars=kc$cov.pars,kappa=kc$cov.kappa)
+  cs <- cov.spatial(obj=loccoords(coords=dcoords,locations=loci),cov.model=kc$cov.model,cov.pars=kc$cov.pars,kappa=kc$cov.kappa)
   vcinv <- varcov.spatial(coords=dcoords, cov.model=kc$cov.model,cov.pars=kc$cov.pars,kappa=kc$kappa,nugget=kc$nugget,inv=TRUE)$inverse
   sigmasq <- kc$cov.pars[1]
   #c1 <- makeForkCluster(n.par) # doesn't work on windoze, but faster on *nix
   sigmak <- parLapply(c1,seq(1,nrow(loci)),function(i){ sigmasq - t(cs[,i]) %*% vcinv %*% t(t(cs[,i])) })
   #stopCluster(c1)
   rm(vcinv,cs)
-  return(sigmak)
+  return(as.numeric(sigmak))
 } 
 
 roughness <- function(map,height,width,nr=1,pix.per.m=0.2,beta=1.5,alpha=1.0){

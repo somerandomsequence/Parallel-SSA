@@ -20,7 +20,7 @@
 
 #define N 25          // number of coordinates in a solution
 #define M 50          // number of solutions to maintain in pool
-#define MAX_RUNS 100  // maximum number of slave-runs to do
+#define MAX_RUNS 10   // maximum number of slave-runs to do
 #define VERBOSE 1     // debugging output (on = 1, off = 0)
 #define COLOR 1       // colorize output (on = 1, off = 0)
 #define GDB_ATTACH 0  // sleep in master to allow a gdb attachment
@@ -148,6 +148,31 @@ int initialize_points(void){
   return n;
 }
 
+void save_checkpoint(){
+  int i,j = 0;
+  FILE *fh = fopen("checkpoint_pool.dat","wb");
+  for(i = 0; i < M; i++){
+    fwrite(&pool[i],sizeof(struct job),1,fh);
+    for(j = 0; j < N; j++){
+      fwrite(&(pool[i].coords[j]),sizeof(struct coord),1,fh);
+    }
+  }
+  fclose(fh);
+}
+
+int load_checkpoint(){
+  int i,j = 0;
+  FILE *fh = fopen("checkpoint_pool.dat","rb");
+  for(i = 0; i < M; i++){
+    fread(&pool[i],sizeof(struct job),1,fh);
+    pool[i].coords = (struct coord *)malloc(sizeof(struct coord)*N);
+    for(j = 0; j < N; j++){
+      fread(&(pool[i].coords[j]),sizeof(struct coord),1,fh);
+    }
+  }
+  fclose(fh);
+}
+
 /* fill pool with M randomly chosen (but not repeating) candidate solutions (master) */
 void initialize_pool(int npoints){
   int i, j, k, r;
@@ -234,6 +259,9 @@ void check_in_candidate(int id){
       break;
     }
   }
+
+  save_checkpoint();
+
   debug("Checked in candidate from %d with fitness %f (gain %f)\n",id,pool[i].fitness,pool[i].last_gain);
   print_coords(coords,N);
 
@@ -245,7 +273,7 @@ void check_in_candidate(int id){
 /* Do something with a candidate (slave) */
 int process_candidate(double *fitness_before, double *fitness_after, int nruns){
   int i, len, j, maxlen;
-  const char *prog = "/home/esl/caleb/R-2.13.0/bin/R --vanilla --args ";
+  const char *prog = "/home/esl/caleb/R-2.14.0/bin/R --vanilla --args ";
   const char *progpost = " < slave.R 2>&1";
   char *cmd;
   char *pos;
@@ -388,7 +416,11 @@ int main(int argc, char** argv) {
     debug("Okay, points are initialized.\n");
 
     debug("Master is initializing pool...\n");
-    initialize_pool(npoints);
+    if(access("checkpoint_pool.dat",R_OK) == 0){
+      load_checkpoint();
+    }else{
+      initialize_pool(npoints);
+    }
     debug("Pool initialized!\n");
 
     /* Send initial candidates out to slaves */
