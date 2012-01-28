@@ -13,6 +13,7 @@ e <- commandArgs(TRUE)[1]
 e <- as.numeric(unlist(strsplit(e, "\\.")))
 de <- candidates[e,]
 runid <- commandArgs(TRUE)[2]
+e_before <- e
 
 t <- tmax
 if(parallelize){
@@ -88,9 +89,13 @@ if(parallelize){
 wpe.gain <- first.fitness-fitness
 akv.gain <- first.fitness2-fitness2
 
-print(cat("FITNESS",first.fitness,fitness,first.fitness2,fitness2,""))
+etime <- as.numeric(Sys.time())
+
+print(cat("FITNESS",first.fitness,fitness,first.fitness2,fitness2,etime,""))
 print(cat("SAMPLE",e,""))
 
-save(n,first.fitness,first.fitness2,dcoords,
+save(n,first.fitness,first.fitness2,dcoords,wpe.gain,akv.gain,fitness,fitness2,etime,e_before,
      e,log,tmax,candidates,
-     file=paste(sep="","sa_slave_",runid,".RData"))
+     file=paste(sep="","sa_slave_",runid,"_",etime,".RData"))
+
+print(cat("DONE",""))
