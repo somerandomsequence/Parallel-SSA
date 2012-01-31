@@ -15,20 +15,23 @@
 #include <string.h>
 #include <unistd.h>
 #include <math.h>
+#include <time.h>
 #include <mpi.h>
 #include <stdio.h>
 
-#define N 25          // number of coordinates in a solution
-#define M 50          // number of solutions to maintain in pool
-#define MAX_RUNS 10   // maximum number of slave-runs to do
+#define N 50          // number of coordinates in a solution
+#define M 200         // number of solutions to maintain in pool
 #define VERBOSE 1     // debugging output (on = 1, off = 0)
 #define COLOR 1       // colorize output (on = 1, off = 0)
 #define GDB_ATTACH 0  // sleep in master to allow a gdb attachment
+#define REOPT 0       // 0 => reoptimize, 1 => don't
 
 #define TAG_COORDS 0
 #define TAG_SHUTDOWN 1
 #define TAG_FITBEFORE 2
 #define TAG_FITAFTER 3
+#define TAG_ETIME 4
+#define TAG_POOLID 5
 
 /* some colorization stuff stolen from http://linuxgazette.net/issue65/padala.html */
 #define RESET		0
@@ -60,6 +63,7 @@ struct job{
 	int run_count;
 	int owner;
 	int last_owner;
+	int best_etime;
 	double fitness;
 	double last_gain;
 };
@@ -68,11 +72,13 @@ struct job{
 int rank;                    // rank of process
 int np;                      // number of processes (1 master, np-1 slaves)
 MPI_Datatype coord_type; 
-struct coord coords[N];
+struct coord mpi_coords[N];
 struct job pool[M];
 struct coord *points;
-double fitness_before;
-double fitness_after;
+double mpi_fitness_before;
+double mpi_fitness_after;
+int mpi_etime;
+int mpi_pool_id;
 
 /* colorize output text */
 void textcolor(int attr, int fg, int bg) {
@@ -125,7 +131,7 @@ int initialize_points(void){
 
   points = (struct coord *)malloc(sizeof(struct coord)*n);
   if(points == NULL){
-    debug("Failed to allocate memory to hold candidate points. Exiting.");
+    debug("Failed to allocate memory to hold candidate points. Exiting.\n");
     exit(1);
   }
 
@@ -166,6 +172,8 @@ int load_checkpoint(){
   for(i = 0; i < M; i++){
     fread(&pool[i],sizeof(struct job),1,fh);
     pool[i].coords = (struct coord *)malloc(sizeof(struct coord)*N);
+    pool[i].owner = -1;
+    pool[i].checked_out = 0; // assume nothing is checked out!
     for(j = 0; j < N; j++){
       fread(&(pool[i].coords[j]),sizeof(struct coord),1,fh);
     }
@@ -181,6 +189,7 @@ void initialize_pool(int npoints){
     pool[i].run_count = 0;
     pool[i].owner = -1;
     pool[i].last_owner = -1;
+    pool[i].best_etime = -1;
     pool[i].fitness = -1.0;
     pool[i].last_gain = 0.0;
     pool[i].coords = (struct coord *)malloc(sizeof(struct coord)*N);
@@ -212,29 +221,60 @@ void print_coords(struct coord *c, int n){
 }
 
 /* Prepare a candidate to send to a slave (master) */
-void check_out_candidate(int id){
+/* returns 0 on success, >0 otherwise */
+int check_out_candidate(int id){
   int r,j;
   int found = -1;
+  int loopcount = 0;
   // if the pool has no non-taken candidates, this will loop forever (or until a client checks one in)
   // because of this: M should be >> np
-  while(found < 0){
-    r = floor((((double)rand())/((double) RAND_MAX)) * M);
-    if(pool[r].checked_out == 0){
-      found = r;
+  if(REOPT){
+    debug("Finding a random, open candidate for node %d...\n",id);
+    while(1){
+      r = floor((((double)rand())/((double) RAND_MAX)) * (M-1));
+      if((r < 0) || (r >= M)){
+        debug("Rand index out of bounds %d\n",r);
+        continue;
+      }
+      if(pool[r].checked_out == 0){
+        found = r;
+        break;
+      }
+      loopcount++;
+      if(loopcount >= 1000){
+        debug("Failed to find an open candidate after 1000 iterations! Something is wrong. Exiting.\n");
+        break;
+      }
+    }    
+  }else{
+    for(j = 0; j < M; j++){
+      if((pool[j].checked_out == 0) && (pool[j].run_count == 0)){
+        found = j;
+        break;
+      }
     }
-  }    
+  }
+  if(found < 0){
+    debug("No viable candidate found in check_out_candidate\n");
+    return 1;
+  }
+
+  debug("Marking it as checked out...\n");
   pool[found].checked_out = 1;
   pool[found].run_count++;
   pool[found].owner = id;
  
+  debug("Copying the coords...\n");
   for(j = 0; j < N; j++){
-    coords[j].n = pool[found].coords[j].n;
-    coords[j].e = pool[found].coords[j].e;
-    coords[j].i = pool[found].coords[j].i;
+    mpi_coords[j].n = pool[found].coords[j].n;
+    mpi_coords[j].e = pool[found].coords[j].e;
+    mpi_coords[j].i = pool[found].coords[j].i;
   }
+  mpi_pool_id = found;
 
   debug("Checked out Candidate to %d\n",id);
-  print_coords(coords,N);
+  print_coords(mpi_coords,N);
+  return 0;
 }
 
 /* Process a candidate returned by a slave (master) */
@@ -246,13 +286,19 @@ void check_in_candidate(int id){
       pool[i].last_owner = id;
       pool[i].owner = -1;
       pool[i].checked_out = 0;
-      if(fitness_after > 0){ // fitness_after is <0 if something went wrong on the slave
-        pool[i].fitness = fitness_after;
-        pool[i].last_gain = fitness_before-fitness_after;
-        for(j = 0; j < N; j++){
-          pool[i].coords[j].i = coords[j].i;
-          pool[i].coords[j].n = points[coords[j].i].n;
-          pool[i].coords[j].e = points[coords[j].i].e;
+      if(mpi_fitness_after > 0){ // fitness_after is <0 if something went wrong on the slave
+        pool[i].fitness = mpi_fitness_after;
+        pool[i].last_gain = mpi_fitness_before-mpi_fitness_after;
+
+        // only do update if there was actually an improvement
+        if(pool[i].last_gain > 0){
+          pool[i].fitness = mpi_fitness_after;
+          pool[i].best_etime = mpi_etime;
+          for(j = 0; j < N; j++){
+            pool[i].coords[j].i = mpi_coords[j].i;
+            pool[i].coords[j].n = points[mpi_coords[j].i].n;
+            pool[i].coords[j].e = points[mpi_coords[j].i].e;
+          }
         }
       }
       found = 1;
@@ -260,10 +306,10 @@ void check_in_candidate(int id){
     }
   }
 
-  save_checkpoint();
-
   debug("Checked in candidate from %d with fitness %f (gain %f)\n",id,pool[i].fitness,pool[i].last_gain);
-  print_coords(coords,N);
+  print_coords(mpi_coords,N);
+
+  save_checkpoint();
 
   if(found == 0){
     debug("Failed to find item to check into pool for slave %d\n",id);
@@ -271,9 +317,9 @@ void check_in_candidate(int id){
 }
 
 /* Do something with a candidate (slave) */
-int process_candidate(double *fitness_before, double *fitness_after, int nruns){
+int process_candidate(){
   int i, len, j, maxlen;
-  const char *prog = "/home/esl/caleb/R-2.14.0/bin/R --vanilla --args ";
+  const char *prog = "/home/phillict/R-2.14.0/bin/R --vanilla --args ";
   const char *progpost = " < slave.R 2>&1";
   char *cmd;
   char *pos;
@@ -288,19 +334,17 @@ int process_candidate(double *fitness_before, double *fitness_after, int nruns){
   int indices[N];
 
   // construct the run id which is <rank>.<#>
-  int runidlen = 8;
-  if(nruns <= 1) runidlen += 1;
-  else runidlen += ceil(log((double)nruns)/log(10.0));
+  int runidlen = 128; // two integers will never be this big
   char *runid = (char *)malloc(sizeof(char)*runidlen);
-  snprintf(runid,runidlen,"%06d.%d",rank,nruns);
+  snprintf(runid,runidlen,"%d.%d",rank,mpi_pool_id);
 
   debug("Processing Candidate: \n"); 
-  print_coords(coords,N);
+  print_coords(mpi_coords,N);
 
   // determine the maximum printed length of any given id
   maxlen = 0;
   for(i = 0; i < N; i++){
-    len = ceil(log((double)(coords[i].i))/log(10.0));
+    len = ceil(log((double)(mpi_coords[i].i))/log(10.0));
     if(len > maxlen) maxlen = len;
   }
   // allocate enough space to whole entire command
@@ -312,7 +356,7 @@ int process_candidate(double *fitness_before, double *fitness_after, int nruns){
   strcpy(cmd,prog);
   pos = &(cmd[strlen(cmd)]); // points to the null byte at the end of the cmd string
   for(i = 0; i < N; i++){
-    sprintf(tmp,"%d.",coords[i].i);
+    sprintf(tmp,"%d.",mpi_coords[i].i);
     strcpy(pos,tmp);
     pos = &(cmd[strlen(cmd)]);
   }
@@ -332,6 +376,7 @@ int process_candidate(double *fitness_before, double *fitness_after, int nruns){
   while(fgets(buffer,buflen,ph) != NULL){
     debug(buffer);
     if(strncmp(buffer,"FITNESS",7) == 0){
+      debug("Saw FITNESS\n");
       for(j = 1, str = buffer; ;j++, str = NULL){
         tok = strtok_r(str," ",&strptr);
         if(tok == NULL) break;
@@ -340,14 +385,20 @@ int process_candidate(double *fitness_before, double *fitness_after, int nruns){
         else if(j == 3) wpe_after = atof(tok);
         else if(j == 4) akv_before = atof(tok);
         else if(j == 5) akv_after = atof(tok);
+        else if(j == 6) mpi_etime = atoi(tok);
       }
     }
     else if(strncmp(buffer,"SAMPLE",6) == 0){
+      debug("Saw SAMPLE\n");
       for(j = 1, str = buffer; ;j++, str = NULL){
         tok = strtok_r(str," ",&strptr);
         if(tok == NULL) break;
         if((j > 1) && (j <= (N+1))) indices[j-2] = atoi(tok);
       }
+    }
+    else if(strncmp(buffer,"DONE",4) == 0){
+      debug("Saw DONE\n");
+      break;
     }
   }
   pclose(ph);
@@ -358,10 +409,12 @@ int process_candidate(double *fitness_before, double *fitness_after, int nruns){
     return 1;
   }
 
-  *fitness_before = wpe_before;
-  *fitness_after = wpe_after;
+  debug("R Finished, copying output\n");
+
+  mpi_fitness_before = wpe_before;
+  mpi_fitness_after = wpe_after;
   for(i = 0; i < N; i++){
-    coords[i].i = indices[i];
+    mpi_coords[i].i = indices[i];
   }
 
   return 0;
@@ -378,7 +431,7 @@ int main(int argc, char** argv) {
   int work_available = 0;
   int base;
 
-  srand(42);
+  srand(time(NULL));
 
   MPI_Init(&argc, &argv);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -389,10 +442,10 @@ int main(int argc, char** argv) {
   MPI_Aint     disps[4]; 
 
   /* Calculate the displacements of the structure components and the structure overall*/
-  MPI_Get_address(coords, disps);
-  MPI_Get_address(&coords[0].e, disps+1);
-  MPI_Get_address(&coords[0].i, disps+2);
-  MPI_Get_address(&coords[1], disps+3);
+  MPI_Get_address(mpi_coords, disps);
+  MPI_Get_address(&mpi_coords[0].e, disps+1);
+  MPI_Get_address(&mpi_coords[0].i, disps+2);
+  MPI_Get_address(&mpi_coords[1], disps+3);
   base = disps[0];
   for (i=0;i<4; i++) disps[i] -= base;
 
@@ -420,38 +473,50 @@ int main(int argc, char** argv) {
       load_checkpoint();
     }else{
       initialize_pool(npoints);
+      save_checkpoint();
     }
     debug("Pool initialized!\n");
 
     /* Send initial candidates out to slaves */
     for (i=1; i<np; i++){
-      check_out_candidate(i);
-      MPI_Send(coords, N, coord_type, i, TAG_COORDS, MPI_COMM_WORLD);
+      if(check_out_candidate(i) != 0){
+        // if no viable candidate, tell slave to shut down
+        MPI_Send(&dummy_val, 1, MPI_INT, i, TAG_SHUTDOWN, MPI_COMM_WORLD);
+      }else{
+        debug("Sending candidate to %d\n",i);
+        MPI_Send(&mpi_pool_id, 1, MPI_INTEGER, i, TAG_POOLID, MPI_COMM_WORLD);
+        MPI_Send(mpi_coords, N, coord_type, i, TAG_COORDS, MPI_COMM_WORLD);
+      }
     }
 
     /* Go through the rest of the candidate pool and send to slaves */
     for (;;){
+      debug("Master is waiting to receive something from slaves...\n");
       /* See if any of the slaves have a possible solution for us */
-      MPI_Recv(coords, N, coord_type, MPI_ANY_SOURCE, TAG_COORDS, MPI_COMM_WORLD, &status);
-      MPI_Recv(&fitness_before, 1, MPI_DOUBLE, status.MPI_SOURCE, TAG_FITBEFORE, MPI_COMM_WORLD, &status);
-      MPI_Recv(&fitness_after, 1, MPI_DOUBLE, status.MPI_SOURCE, TAG_FITAFTER, MPI_COMM_WORLD, &status);
+      MPI_Recv(mpi_coords, N, coord_type, MPI_ANY_SOURCE, TAG_COORDS, MPI_COMM_WORLD, &status);
+      MPI_Recv(&mpi_etime, 1, MPI_INTEGER, status.MPI_SOURCE, TAG_ETIME, MPI_COMM_WORLD, &status);
+      MPI_Recv(&mpi_fitness_before, 1, MPI_DOUBLE, status.MPI_SOURCE, TAG_FITBEFORE, MPI_COMM_WORLD, &status);
+      MPI_Recv(&mpi_fitness_after, 1, MPI_DOUBLE, status.MPI_SOURCE, TAG_FITAFTER, MPI_COMM_WORLD, &status);
 
       nruns++; // count runs by all slaves
 
       // fitness_after will be negative if something went wrong
       check_in_candidate(status.MPI_SOURCE);
 
-      if (nruns > MAX_RUNS) break;
+      // send shutdown signal to slave
+      MPI_Send(&dummy_val, 1, MPI_INT, status.MPI_SOURCE, TAG_SHUTDOWN, MPI_COMM_WORLD);
 
-      // FIXME: at some point, prune or evolve the pool or something
+      // when every slave has reported in, break
+      if(nruns == (np-1)) break;
 
       /* Send out next candidate to the slave that just reported in */
-      check_out_candidate(status.MPI_SOURCE);
-      MPI_Send(coords, N, coord_type, status.MPI_SOURCE, TAG_COORDS, MPI_COMM_WORLD);
+      //check_out_candidate(status.MPI_SOURCE);
+      //MPI_Send(&mpi_pool_id, 1, MPI_INTEGER, master, TAG_POOLID, MPI_COMM_WORLD);
+      //MPI_Send(mpi_coords, N, coord_type, status.MPI_SOURCE, TAG_COORDS, MPI_COMM_WORLD);
     }
 
     /* send shutdown signal to all slaves */
-    for (i=1; i<np; i++) MPI_Send(&dummy_val, 1, MPI_INT, i, TAG_SHUTDOWN, MPI_COMM_WORLD);
+    //for (i=1; i<np; i++) MPI_Send(&dummy_val, 1, MPI_INT, i, TAG_SHUTDOWN, MPI_COMM_WORLD);
 
     // look through pool and pick out winner
     double min_fitness = -1.0;
@@ -467,7 +532,8 @@ int main(int argc, char** argv) {
       }
     }
     debug("Minimum fitness obtained = %f, worst (optimized) fitness is %f worse\n",min_fitness,max_fitness-min_fitness);
-    debug("Best result is in sa_slave_%06d.*.RData, although I'm not sure which run id...\n",pool[min_fitness_index].last_owner);
+    debug("Best result is in sa_slave_%06d_%d.RData, although I'm not sure which run id...\n",
+          pool[min_fitness_index].last_owner,pool[min_fitness_index].best_etime);
     debug("Here's the sample:\n");
     print_coords(pool[min_fitness_index].coords,N);
 
@@ -475,7 +541,6 @@ int main(int argc, char** argv) {
 
     /* Receive work from the master process until it says we're done */
     for (;;){
-
       /* Check for a shutdown signal from the master */
       MPI_Iprobe(master, TAG_SHUTDOWN, MPI_COMM_WORLD, &done, &status);
       if (done){ 
@@ -487,20 +552,23 @@ int main(int argc, char** argv) {
       MPI_Iprobe(master, TAG_COORDS, MPI_COMM_WORLD, &work_available, &status);
       if (work_available){
         /* Receive candidate from master to process */ 
-	MPI_Recv(coords, N, coord_type, master, TAG_COORDS, MPI_COMM_WORLD, &status);
+        MPI_Recv(&mpi_pool_id, 1, MPI_INTEGER, status.MPI_SOURCE, TAG_POOLID, MPI_COMM_WORLD, &status);
+	MPI_Recv(mpi_coords, N, coord_type, master, TAG_COORDS, MPI_COMM_WORLD, &status);
 
 	/* Perform simulated annealing on candidate */
-	if(process_candidate(&fitness_before,&fitness_after,nruns++) > 0){
+	if(process_candidate() > 0){
           debug("Problems in process candidate\n");
           // make these negative so the master know's something went wrong.
-          fitness_after = -1.0;
-          fitness_before = -1.0;
+          mpi_fitness_after = -1.0;
+          mpi_fitness_before = -1.0;
+          mpi_etime = -1;
         }
 
 	/* Send our results back to the master */
-        MPI_Send(&fitness_after, 1, MPI_DOUBLE, master, TAG_FITAFTER, MPI_COMM_WORLD);
-        MPI_Send(&fitness_before, 1, MPI_DOUBLE, master, TAG_FITBEFORE, MPI_COMM_WORLD);
-        MPI_Send(coords, N, coord_type, master, TAG_COORDS, MPI_COMM_WORLD);
+        MPI_Send(&mpi_fitness_after, 1, MPI_DOUBLE, master, TAG_FITAFTER, MPI_COMM_WORLD);
+        MPI_Send(&mpi_fitness_before, 1, MPI_DOUBLE, master, TAG_FITBEFORE, MPI_COMM_WORLD);
+        MPI_Send(&mpi_etime, 1, MPI_INTEGER, master, TAG_ETIME, MPI_COMM_WORLD);
+        MPI_Send(mpi_coords, N, coord_type, master, TAG_COORDS, MPI_COMM_WORLD);
       }
     } 
   }
