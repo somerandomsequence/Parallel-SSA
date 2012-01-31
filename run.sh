@@ -6,7 +6,7 @@
 #PBS -l walltime=10:00:00
 
 # Name the job
-#PBS -N parallel_sa
+#PBS -N parallel_sa50
 
 # Requesting the janus-debug queue (Limited to one hour of walltime)
 #PBS -q janus-normal
@@ -56,4 +56,4 @@ cd $PBS_O_WORKDIR
 # this option will get mpi to only start one job per host allowing OpenMP to parallelize on that host.
 # Since we only requested one core per host (ppn=1), this is superfluous but was left as an example.  
 
-mpirun -np 31 -pernode /home/phillict/thud/parallel_sa3/master_slave
+mpirun -np 31 -pernode /home/phillict/thud/parallel_sa4/master_slave
